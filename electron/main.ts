@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen } from 'electron'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -122,11 +122,15 @@ function registerIPC() {
 let win: BrowserWindow | null
 
 async function createWindow() {
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize
+  const winWidth = 280
+  const winHeight = 180
+
   win = new BrowserWindow({
-    width: 250,
-    height: 200,
+    width: winWidth,
+    height: winHeight,
     x: 0,
-    y: 0,
+    y: screenHeight - winHeight,
     alwaysOnTop: true,
     skipTaskbar: false,
     frame: false,
