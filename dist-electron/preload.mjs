@@ -7,5 +7,6 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   saveSettings: (settings) => electron.ipcRenderer.invoke("save-settings", settings),
   getLearningState: () => electron.ipcRenderer.invoke("get-learning-state"),
   saveLearningState: (state) => electron.ipcRenderer.invoke("save-learning-state", state),
-  importDialogues: () => electron.ipcRenderer.invoke("import-dialogues")
+  importDialogues: () => electron.ipcRenderer.invoke("import-dialogues"),
+  saveImage: (base64Data, wordId) => electron.ipcRenderer.invoke("save-image", base64Data, wordId)
 });

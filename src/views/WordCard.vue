@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import type { VocabEntry, WordLearningState, MovieExample, AppSettings } from '../types'
 
 defineProps<{
@@ -13,9 +13,53 @@ const learningState = ref<Record<string, WordLearningState>>({})
 const settings = ref<AppSettings | null>(null)
 
 // LLM 获取状态
-const fetching = ref(false)
-const preview = ref<MovieExample | null>(null)
 const showRealExam = ref(false)
+
+// 手动添加影视例句弹窗
+const showAddModal = ref(false)
+const newExample = ref({ sentence: '', translation: '', source: '', image: '' })
+const imagePreview = ref('')  // 图片预览（base64 或 URL）
+const movieExampleIndex = ref(0)
+
+// 搜索功能
+const showSearch = ref(false)
+const searchQuery = ref('')
+const searchHighlight = ref(0)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+const searchResults = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return []
+  return words.value
+    .map((w, index) => ({ word: w.headWord, index }))
+    .filter(item => item.word.toLowerCase().includes(q))
+    .slice(0, 10)
+})
+
+function toggleSearch() {
+  showSearch.value = !showSearch.value
+  searchHighlight.value = 0
+  if (showSearch.value) {
+    nextTick(() => searchInputRef.value?.focus())
+  }
+}
+
+function handleSearchKeydown(e: KeyboardEvent) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    searchHighlight.value = Math.min(searchHighlight.value + 1, searchResults.value.length - 1)
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    searchHighlight.value = Math.max(searchHighlight.value - 1, 0)
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    if (searchResults.value.length > 0) {
+      jumpToWord(searchResults.value[searchHighlight.value].index)
+    }
+  } else if (e.key === 'Escape') {
+    showSearch.value = false
+    searchQuery.value = ''
+  }
+}
 
 const currentWord = computed(() => {
   if (words.value.length === 0) return null
@@ -27,14 +71,19 @@ const wordContent = computed(() => {
 })
 
 const wordId = computed(() => {
-  return currentWord.value?.content.word.wordId ?? ''
+  return currentWord.value?.headWord ?? ''
 })
 
 // 当前单词的影视例句（用户保存的）
-const savedMovieExample = computed(() => {
+const movieExamples = computed(() => {
   const state = learningState.value[wordId.value]
-  if (!state || state.movieExamples.length === 0) return null
-  return state.movieExamples[0]
+  if (!state || state.movieExamples.length === 0) return []
+  return state.movieExamples
+})
+
+const savedMovieExample = computed(() => {
+  if (movieExamples.value.length === 0) return null
+  return movieExamples.value[movieExampleIndex.value % movieExamples.value.length]
 })
 
 // 当前单词的用户图片
@@ -61,15 +110,15 @@ async function loadData() {
 function nextWord() {
   if (words.value.length === 0) return
   currentIndex.value = (currentIndex.value + 1) % words.value.length
-  preview.value = null
   showRealExam.value = false
+  movieExampleIndex.value = 0
 }
 
 function prevWord() {
   if (words.value.length === 0) return
   currentIndex.value = (currentIndex.value - 1 + words.value.length) % words.value.length
-  preview.value = null
   showRealExam.value = false
+  movieExampleIndex.value = 0
 }
 
 function speak() {
@@ -79,83 +128,82 @@ function speak() {
   speechSynthesis.speak(utterance)
 }
 
-// 调用大模型获取影视例句
-async function fetchExample() {
-  if (!currentWord.value || !settings.value) return
-  if (!settings.value.useLLM || !settings.value.llmApiKey) {
-    alert('请先在设置中配置大模型API')
-    return
-  }
-
-  fetching.value = true
-  preview.value = null
-
-  try {
-    const word = currentWord.value.headWord
-    const trans = wordContent.value?.trans?.map(t => t.tranCn).join('；') || ''
-    const sources = settings.value.preferredSources.join('、')
-
-    const prompt = `请为英语单词"${word}"（意思：${trans}）找一个在影视作品或音乐中的真实使用例句。优先从以下作品中查找：${sources}。
-
-请返回严格JSON格式（不要其他内容）：
-{
-  "sentence": "英文原句",
-  "translation": "中文翻译",
-  "source": "来源，如 Friends S01E03",
-  "sourceType": "tv 或 movie 或 music",
-  "image": "一个能代表这个场景的图片URL（如果没有就留空字符串）"
-}`
-
-    const response = await fetch(settings.value.llmApiUrl || 'https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${settings.value.llmApiKey}`,
-      },
-      body: JSON.stringify({
-        model: settings.value.llmModel || 'gpt-3.5-turbo',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.8,
-      }),
-    })
-    const data = await response.json()
-    const content = data.choices?.[0]?.message?.content
-    if (content) {
-      const parsed = JSON.parse(content)
-      preview.value = {
-        sentence: parsed.sentence,
-        translation: parsed.translation,
-        source: parsed.source,
-        sourceType: parsed.sourceType || 'tv',
-        image: parsed.image || undefined,
-      }
-    }
-  } catch (e: any) {
-    alert('获取失败: ' + e.message)
-  } finally {
-    fetching.value = false
-  }
+// 打开手动添加弹窗
+function openAddModal() {
+  newExample.value = { sentence: '', translation: '', source: '', image: '' }
+  imagePreview.value = ''
+  showAddModal.value = true
 }
 
-// 保存预览结果
-async function savePreview() {
-  if (!preview.value || !wordId.value) return
+// 保存手动添加的例句
+async function saveManualExample() {
+  if (!newExample.value.sentence || !wordId.value) return
   const id = wordId.value
   if (!learningState.value[id]) {
     learningState.value[id] = { wordId: id, movieExamples: [] }
   }
-  learningState.value[id].movieExamples.unshift(preview.value)
-  if (preview.value.image) {
-    learningState.value[id].image = preview.value.image
+
+  let imagePath = newExample.value.image || undefined
+  // 如果是粘贴的 base64 图片，保存为本地文件
+  if (imagePreview.value && imagePreview.value.startsWith('data:image')) {
+    imagePath = await window.electronAPI.saveImage(imagePreview.value, id)
   }
-  await window.electronAPI.saveLearningState(learningState.value)
-  preview.value = null
+
+  learningState.value[id].movieExamples.push({
+    sentence: newExample.value.sentence,
+    translation: newExample.value.translation,
+    source: newExample.value.source,
+    sourceType: 'tv',
+    image: imagePath,
+  })
+  await window.electronAPI.saveLearningState(JSON.parse(JSON.stringify(learningState.value)))
+  showAddModal.value = false
+  // 切换到刚添加的那条
+  movieExampleIndex.value = learningState.value[id].movieExamples.length - 1
 }
 
-// 换一个
-function tryAnother() {
-  preview.value = null
-  fetchExample()
+// 处理粘贴图片
+function handleImagePaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault()
+      const file = item.getAsFile()
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        imagePreview.value = reader.result as string
+        newExample.value.image = ''  // 清空 URL 输入
+      }
+      reader.readAsDataURL(file)
+      break
+    }
+  }
+}
+
+// URL 输入变更时更新预览
+function onImageUrlChange() {
+  if (newExample.value.image) {
+    imagePreview.value = newExample.value.image
+  } else {
+    imagePreview.value = ''
+  }
+}
+
+// 切换影视例句
+function nextMovieExample() {
+  if (movieExamples.value.length <= 1) return
+  movieExampleIndex.value = (movieExampleIndex.value + 1) % movieExamples.value.length
+}
+
+// 搜索跳转
+function jumpToWord(index: number) {
+  currentIndex.value = index
+  showSearch.value = false
+  searchQuery.value = ''
+  showRealExam.value = false
+  movieExampleIndex.value = 0
 }
 
 onMounted(() => {
@@ -184,6 +232,29 @@ defineExpose({ loadWords: loadData })
     <button v-if="currentWord" class="nav-btn nav-next" @click="nextWord"><i class="bi bi-chevron-right"></i></button>
     <!-- 设置按钮 -->
     <button class="settings-btn" @click="onOpenSettings"><i class="bi bi-gear"></i></button>
+    <!-- 搜索按钮 -->
+    <button class="search-btn" @click="toggleSearch"><i class="bi bi-search"></i></button>
+    <!-- 搜索面板 -->
+    <div class="search-panel" v-if="showSearch">
+      <input
+        ref="searchInputRef"
+        class="search-input"
+        v-model="searchQuery"
+        placeholder="搜索单词..."
+        @keydown.stop="handleSearchKeydown"
+        @input="searchHighlight = 0"
+      />
+      <div class="search-results" v-if="searchResults.length > 0">
+        <div
+          class="search-result-item"
+          :class="{ active: i === searchHighlight }"
+          v-for="(item, i) in searchResults"
+          :key="item.index"
+          @click="jumpToWord(item.index)"
+          @mouseenter="searchHighlight = i"
+        >{{ item.word }}</div>
+      </div>
+    </div>
 
     <div class="word-card">
       <div v-if="loading" class="empty-state">加载中...</div>
@@ -222,17 +293,20 @@ defineExpose({ loadWords: loadData })
           </p>
       </div>
 
-      <!-- 获取影视例句按钮 -->
-      <div class="fetch-area" v-if="!preview && !fetching">
-        <button class="fetch-btn" @click="fetchExample"><i class="bi bi-film"></i></button>
-      </div>
-      <div class="fetch-area" v-if="fetching">
-        <span class="fetching-text">...</span>
+      <!-- 添加影视例句按钮 -->
+      <div class="fetch-area">
+        <button class="fetch-btn" @click="openAddModal"><i class="bi bi-film"></i></button>
       </div>
 
       <!-- 影视例句（用户保存的） -->
-      <div class="word-example movie" v-if="savedMovieExample && !preview">
-        <p class="section-label">影视例句</p>
+      <div class="word-example movie" v-if="savedMovieExample">
+        <div class="section-label-row">
+          <p class="section-label">影视例句</p>
+          <span v-if="movieExamples.length > 1" class="movie-nav" @click="nextMovieExample">
+            {{ movieExampleIndex + 1 }}/{{ movieExamples.length }} <i class="bi bi-chevron-right"></i>
+          </span>
+        </div>
+        <img v-if="savedMovieExample.image" class="movie-image" :src="savedMovieExample.image" />
         <p class="example-sentence">"{{ savedMovieExample.sentence }}"</p>
         <p class="example-translation hover-reveal">{{ savedMovieExample.translation }}</p>
         <p class="example-source">—— {{ savedMovieExample.source }}</p>
@@ -278,19 +352,6 @@ defineExpose({ loadWords: loadData })
       </div>
 
       <!-- 预览区域 -->
-      <div class="preview-area" v-if="preview">
-        <div class="preview-label">预览（未保存）</div>
-        <div class="word-example preview">
-          <p class="example-sentence">"{{ preview.sentence }}"</p>
-          <p class="example-translation">{{ preview.translation }}</p>
-          <p class="example-source">—— {{ preview.source }}</p>
-        </div>
-        <div class="preview-actions">
-          <button class="action-btn save" @click="savePreview"><i class="bi bi-check-lg"></i> 保存</button>
-          <button class="action-btn retry" @click="tryAnother"><i class="bi bi-arrow-clockwise"></i> 换一个</button>
-        </div>
-      </div>
-
       <!-- 记忆方法 -->
       <div class="section-block rem-method" v-if="wordContent?.remMethod?.val">
         <span class="section-label">记忆</span>
@@ -315,6 +376,29 @@ defineExpose({ loadWords: loadData })
 
     </template>
     </div>
+
+    <!-- 添加影视例句弹窗 -->
+    <div class="modal-overlay" v-if="showAddModal" @click.self="showAddModal = false">
+      <div class="modal-content">
+        <h3>添加影视例句</h3>
+        <div class="modal-form">
+          <input v-model="newExample.sentence" placeholder="英文原句" />
+          <input v-model="newExample.translation" placeholder="中文翻译" />
+          <input v-model="newExample.source" placeholder="出处，如 Friends S01E03" />
+          <div class="image-input-area">
+            <input v-model="newExample.image" placeholder="图片URL（可选）" @input="onImageUrlChange" />
+            <div class="paste-area" @paste="handleImagePaste" tabindex="0">
+              <span v-if="!imagePreview">Ctrl+V 粘贴图片</span>
+              <img v-else :src="imagePreview" class="image-preview" />
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="modal-btn cancel" @click="showAddModal = false">取消</button>
+          <button class="modal-btn save" @click="saveManualExample">保存</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -325,6 +409,7 @@ defineExpose({ loadWords: loadData })
 }
 
 .word-wrapper {
+  --mask-bg: #e0e0e5;
   position: relative;
   height: 100vh;
   overflow: hidden;
@@ -344,7 +429,7 @@ defineExpose({ loadWords: loadData })
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px 16px 16px 24px;
+  padding: 22px 16px 16px 24px;
   box-sizing: border-box;
   overflow-y: overlay;
   background: linear-gradient(135deg, #667eea0a 0%, #764ba20a 100%);
@@ -417,7 +502,7 @@ defineExpose({ loadWords: loadData })
 }
 
 .word-text {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 800;
   margin: 0;
   color: #1a1a2e;
@@ -484,7 +569,7 @@ defineExpose({ loadWords: loadData })
 }
 
 .word-translation {
-  font-size: 15px;
+  font-size: 12px;
   color: #444;
   margin: 0;
   line-height: 1.6;
@@ -497,7 +582,7 @@ defineExpose({ loadWords: loadData })
 /* 核心：hover 显示隐藏内容 */
 .hover-reveal {
   color: transparent !important;
-  background: #e0e0e5;
+  background: var(--mask-bg);
   border-radius: 4px;
   transition: all 0.25s ease;
   cursor: pointer;
@@ -610,11 +695,6 @@ defineExpose({ loadWords: loadData })
   border-left: 3px solid #667eea;
 }
 
-.word-example.preview {
-  border: 2px dashed #667eea;
-  background: #f8f8ff;
-}
-
 .word-example.real-exam {
   border-left: 3px solid #ff6b6b;
   margin-top: 8px;
@@ -725,52 +805,124 @@ defineExpose({ loadWords: loadData })
 }
 
 /* 预览 */
-.preview-area {
-  margin-bottom: 10px;
+/* 影视例句标题行 */
+.section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.preview-label {
-  font-size: 10px;
+.movie-nav {
+  font-size: 11px;
   color: #667eea;
-  margin-bottom: 4px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  cursor: pointer;
 }
 
-.preview-actions {
+.movie-image {
+  width: 100%;
+  max-height: 120px;
+  object-fit: cover;
+  border-radius: 8px;
+  margin: 6px 0;
+}
+
+/* 添加弹窗 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.modal-content {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  width: 280px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.modal-content h3 {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modal-form input {
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.image-input-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.paste-area {
+  border: 1.5px dashed #ccc;
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #999;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.paste-area:focus {
+  border-color: #667eea;
+}
+
+.image-preview {
+  max-width: 100%;
+  max-height: 80px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.modal-actions {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 12px;
 }
 
-.action-btn {
+.modal-btn {
   flex: 1;
-  padding: 8px 12px;
+  padding: 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
-  transition: transform 0.1s;
 }
 
-.action-btn:active {
-  transform: scale(0.97);
-}
-
-.action-btn.save {
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  color: #fff;
-}
-
-.action-btn.retry {
+.modal-btn.cancel {
   background: #f0f0f3;
   color: #666;
 }
 
-.action-btn.retry:hover {
-  background: #e8e8eb;
+.modal-btn.save {
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: #fff;
 }
 
 /* 获取按钮 */
@@ -792,17 +944,6 @@ defineExpose({ loadWords: loadData })
 .fetch-btn:hover {
   /* background: linear-gradient(135deg, #667eea25, #764ba225); */
   transform: translateY(-1px);
-}
-
-.fetching-text {
-  font-size: 13px;
-  color: #999;
-  animation: pulse 1.5s infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
 }
 
 /* 设置按钮 */
@@ -831,7 +972,95 @@ defineExpose({ loadWords: loadData })
   cursor: pointer;
 }
 
+/* 搜索按钮 */
+.search-btn {
+  position: absolute;
+  top: 6px;
+  right: 46px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #f0f0f5;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.2s;
+  z-index: 101;
+  -webkit-app-region: no-drag;
+}
+
+.search-btn:hover {
+  opacity: 1;
+  cursor: pointer;
+}
+
+/* 搜索面板 */
+.search-panel {
+  position: absolute;
+  top: 38px;
+  right: 14px;
+  width: 180px;
+  z-index: 150;
+  -webkit-app-region: no-drag;
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.search-input:focus {
+  border-color: #667eea;
+}
+
+.search-results {
+  margin-top: 4px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.search-result-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #333;
+  transition: background 0.15s;
+}
+
+.search-result-item:hover {
+  background: rgba(102, 126, 234, 0.1);
+  color: #667eea;
+}
+
+.search-result-item.active {
+  background: rgba(102, 126, 234, 0.1);
+  color: #667eea;
+}
+
+.search-result-item:first-child {
+  border-radius: 8px 8px 0 0;
+}
+
+.search-result-item:last-child {
+  border-radius: 0 0 8px 8px;
+}
+
 @media (prefers-color-scheme: dark) {
+  .word-wrapper { --mask-bg: #e0e0e5; }
   .word-card { background: linear-gradient(135deg, #1a1a2e, #16162a); }
   .word-text { color: #f0f0f5; }
   .word-translation { color: #ccc; }
@@ -840,10 +1069,9 @@ defineExpose({ loadWords: loadData })
   .word-phonetic:hover { background: #33334a; }
   .phonetic-tooltip { background: #555; }
   .phonetic-tooltip::before { border-bottom-color: #555; }
-  .hover-reveal { background: #3a3a4a !important; color: transparent !important; }
+  .hover-reveal { background: var(--mask-bg) !important; color: transparent !important; }
   .hover-reveal:hover { color: inherit !important; background: transparent !important; }
   .word-example { background: #222236; box-shadow: none; }
-  .word-example.preview { background: #252545; border-color: #667eea; }
   .section-block { background: #222236; box-shadow: none; }
   .section-block.rem-method { background: #2a2518; }
   .section-text { color: #ccc; }
@@ -857,8 +1085,19 @@ defineExpose({ loadWords: loadData })
   .nav-btn { background: #2a2a3e; border: none; color: #aaa; opacity: 0.6; }
   .nav-btn:hover { background: #33334a; color: #eee; opacity: 1; }
   .settings-btn { background: #2a2a3e; }
-  .fetch-btn { background: #667eea15; color: #8a9aff; }
-  .fetch-btn:hover { background: #667eea25; }
-  .action-btn.retry { background: #2a2a3e; color: #bbb; }
+  .search-btn { background: #2a2a3e; }
+  .search-input { background: #2a2a3e; color: #eee; border-color: #555; }
+  .search-input:focus { border-color: #8a9aff; }
+  .search-results { background: #2a2a3e; }
+  .search-result-item { color: #ddd; }
+  .search-result-item:hover { background: rgba(138, 154, 255, 0.15); color: #a5b4fc; }
+  .search-result-item.active { background: rgba(138, 154, 255, 0.15); color: #a5b4fc; }
+  .fetch-btn { color: #8a9aff; }
+  .fetch-btn:hover { color: #a5b4fc; }
+  .modal-content { background: #2a2a3e; color: #eee; }
+  .modal-form input { background: #1a1a2e; color: #eee; border-color: #555; }
+  .paste-area { border-color: #555; color: #777; }
+  .paste-area:focus { border-color: #8a9aff; }
+  .modal-btn.cancel { background: #3a3a4e; color: #ccc; }
 }
 </style>

@@ -8,6 +8,7 @@ export interface ElectronAPI {
   getLearningState: () => Promise<Record<string, WordLearningState>>
   saveLearningState: (state: Record<string, WordLearningState>) => Promise<boolean>
   importDialogues: () => Promise<{ fileName: string; content: string } | null>
+  saveImage: (base64Data: string, wordId: string) => Promise<string>
 }
 
 declare global {

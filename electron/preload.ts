@@ -8,4 +8,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLearningState: () => ipcRenderer.invoke('get-learning-state'),
   saveLearningState: (state: any) => ipcRenderer.invoke('save-learning-state', state),
   importDialogues: () => ipcRenderer.invoke('import-dialogues'),
+  saveImage: (base64Data: string, wordId: string) => ipcRenderer.invoke('save-image', base64Data, wordId),
 })

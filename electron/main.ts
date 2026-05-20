@@ -106,6 +106,17 @@ function registerIPC() {
     const content = fs.readFileSync(filePath, 'utf-8')
     return { fileName: path.basename(filePath), content }
   })
+
+  // 保存粘贴的图片（base64 -> 本地文件）
+  ipcMain.handle('save-image', (_event, base64Data: string, wordId: string) => {
+    const imagesDir = path.join(DATA_DIR, 'images')
+    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true })
+    const fileName = `${wordId}_${Date.now()}.png`
+    const filePath = path.join(imagesDir, fileName)
+    const buffer = Buffer.from(base64Data.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+    fs.writeFileSync(filePath, buffer)
+    return filePath
+  })
 }
 
 let win: BrowserWindow | null
